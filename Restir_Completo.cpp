@@ -24,6 +24,8 @@ bool ENABLE_TEMPORAL_REUSE = true;
 bool USE_BASELINE_IMAGE = false;
 bool USE_UNBIASED_MODE = false;
 bool USE_MONTE_CARLO_ONLY = false;
+int BASELINE_RIS_SAMPLES = 0; // NOVA VARIÁVEL: 0 = desabilitado
+int RECURSIVE_ITERATIONS = 1; // NOVA VARIÁVEL: quantidade de renderizações sequenciais a partir do baseline
 
 // Classe para vetores 3D
 class Vec3 {
@@ -388,7 +390,7 @@ public:
 
 // Renderizador ReSTIR CORRIGIDO
 class ReSTIRRenderer {
-private:
+public:
     Scene scene;
     vector<Reservoir> previousFrame;
     vector<SurfacePoint> surfacePoints;
@@ -429,6 +431,54 @@ public:
         hasBaselineImage = true;
         cout << "Imagem baseline carregada com sucesso para reutilização temporal!" << endl;
         return true;
+    }
+    
+    // NOVA FUNÇÃO: Renderiza baseline RIS puro (sem reutilização espacial/temporal)
+    vector<Color> renderRISBaseline(int samples) {
+        vector<Color> image(WIDTH * HEIGHT);
+        vector<SurfacePoint> baselineSurfacePoints(WIDTH * HEIGHT);
+        
+        cout << "Gerando baseline RIS puro com " << samples << " amostras..." << endl;
+        cout << "  - Sem reutilização espacial" << endl;
+        cout << "  - Sem reutilização temporal" << endl;
+        cout << "  - Apenas RIS com " << samples << " candidatos por pixel" << endl;
+        
+        clock_t start = clock();
+        
+        for (int y = 0; y < HEIGHT; y++) {
+            if (y % 50 == 0) {
+                cout << "Baseline RIS - Linha " << y << "/" << HEIGHT
+                     << " (" << fixed << setprecision(1)
+                     << (static_cast<float>(y) / HEIGHT * 100) << "%)" << endl;
+            }
+            
+            for (int x = 0; x < WIDTH; x++) {
+                int pixelIndex = y * WIDTH + x;
+                SurfacePoint point = createSurfacePoint(static_cast<float>(x), static_cast<float>(y));
+                baselineSurfacePoints[pixelIndex] = point;
+                
+                // RIS puro com número especificado de candidatos
+                Reservoir reservoir;
+                reservoir.pixelOrigin = pixelIndex;
+                
+                for (int i = 0; i < samples; i++) {
+                    int lightIndex = randomInt(static_cast<int>(scene.lights.size()));
+                    reservoir.update(scene.lights, point, lightIndex);
+                }
+                
+                // Renderizar cor final
+                Color finalColor = reservoir.getFinalColor(scene.lights, point);
+                Color ambient = point.albedo * 0.005f;
+                finalColor += ambient;
+                image[pixelIndex] = finalColor;
+            }
+        }
+        
+        clock_t end = clock();
+        double duration = static_cast<double>(end - start) / CLOCKS_PER_SEC;
+        cout << "Baseline RIS gerado em " << duration << " segundos" << endl;
+        
+        return image;
     }
     
     Reservoir reconstructReservoirFromBaseline(const Color& baselineColor, const SurfacePoint& point, int pixelIndex) {
@@ -597,12 +647,26 @@ public:
         vector<Color> image(WIDTH * HEIGHT);
         vector<Reservoir> currentFrame(WIDTH * HEIGHT);
         
+        // MODIFICAÇÃO: Verificar se deve gerar baseline RIS interno
+        if (BASELINE_RIS_SAMPLES > 0) {
+            cout << "MODO BASELINE RIS INTERNO ATIVADO" << endl;
+            baselineImage = renderRISBaseline(BASELINE_RIS_SAMPLES);
+            hasBaselineImage = true;
+            USE_BASELINE_IMAGE = true; // Forçar uso do baseline gerado
+        }
+        
         cout << "Renderizando com ReSTIR " << (USE_UNBIASED_MODE ? "UNBIASED CORRIGIDO" : "BIASED") << " + ESFERAS OTIMIZADAS..." << endl;
         cout << "Configuração:" << endl;
         cout << "  MAX_CANDIDATES: " << MAX_CANDIDATES << endl;
         cout << "  AMOSTRAGEM_ESPACIAL: " << (ENABLE_SPATIAL_REUSE ? "ATIVADA" : "DESATIVADA") << endl;
         cout << "  AMOSTRAGEM_TEMPORAL: " << (ENABLE_TEMPORAL_REUSE ? "ATIVADA" : "DESATIVADA") << endl;
-        cout << "  BASELINE_IMAGE: " << (USE_BASELINE_IMAGE && hasBaselineImage ? "ATIVADA" : "DESATIVADA") << endl;
+        
+        if (BASELINE_RIS_SAMPLES > 0) {
+            cout << "  BASELINE_RIS: ATIVADA (" << BASELINE_RIS_SAMPLES << " amostras)" << endl;
+        } else {
+            cout << "  BASELINE_IMAGE: " << (USE_BASELINE_IMAGE && hasBaselineImage ? "ATIVADA" : "DESATIVADA") << endl;
+        }
+        
         cout << "  MODO: " << (USE_UNBIASED_MODE ? "UNBIASED CORRIGIDO - SEM ESCURECIMENTO" : "BIASED") << endl;
         cout << "  Total de luzes: " << scene.lights.size() << endl;
         cout << "  Total de esferas: " << scene.spheres.size() << endl;
@@ -737,6 +801,7 @@ void printUsage(const char* programName) {
     cout << "Uso: " << programName << " [opções]" << endl;
     cout << "Opções:" << endl;
     cout << "  -c, --candidates <numero>      Define MAX_CANDIDATES (padrao: 30)" << endl;
+    cout << "  -v, --baseline-ris <numero>    Gera baseline RIS interno com N amostras" << endl;
     cout << "  -s, --spatial-reuse            Ativa amostragem espacial" << endl;
     cout << "      --no-spatial-reuse         Desativa amostragem espacial" << endl;
     cout << "  -t, --temporal-reuse           Ativa amostragem temporal" << endl;
@@ -745,13 +810,16 @@ void printUsage(const char* programName) {
     cout << "      --biased                   Usa versão biased (padrao)" << endl;
     cout << "      --unbiased                 Usa versão unbiased CORRIGIDA" << endl;
     cout << "      --monte-carlo              Usa Monte Carlo puro (desabilita RIS)" << endl;
+	cout << "  -i, --iterations <numero>       Iterações recursivas a partir do baseline (padrão: 1)" << endl;    
     cout << "  -h, --help                     Mostra esta ajuda" << endl;
     cout << endl;
-    cout << "Exemplos CORRIGIDOS:" << endl;
+    cout << "Exemplos:" << endl;
+    cout << "  " << programName << " -c 1 -v 32 -s -t --unbiased   # RIS c/1 candidato + baseline RIS 32 amostras" << endl;
     cout << "  " << programName << " -c 50 -s -t --unbiased        # Configuração unbiased CORRIGIDA" << endl;
     cout << "  " << programName << " -c 50 -s -t --biased          # Configuração biased completa" << endl;
     cout << "  " << programName << " -b baseline.ppm -t --unbiased # Usa imagem baseline (unbiased CORRIGIDO)" << endl;
     cout << "  " << programName << " --monte-carlo -c 100          # Monte Carlo puro com 100 candidatos" << endl;
+    cout << "  " << programName << " -v 64 -s -t                   # Baseline RIS 64 amostras + ReSTIR completo" << endl;
 }
 
 bool parseArguments(int argc, char* argv[], string& baselineFile) {
@@ -766,6 +834,18 @@ bool parseArguments(int argc, char* argv[], string& baselineFile) {
                 MAX_CANDIDATES = atoi(argv[++i]);
                 if (MAX_CANDIDATES <= 0) {
                     cerr << "Erro: MAX_CANDIDATES deve ser maior que 0" << endl;
+                    return false;
+                }
+            } else {
+                cerr << "Erro: " << arg << " requer um valor" << endl;
+                return false;
+            }
+        }
+        else if (arg == "-v" || arg == "--baseline-ris") {
+            if (i + 1 < argc) {
+                BASELINE_RIS_SAMPLES = atoi(argv[++i]);
+                if (BASELINE_RIS_SAMPLES <= 0) {
+                    cerr << "Erro: BASELINE_RIS_SAMPLES deve ser maior que 0" << endl;
                     return false;
                 }
             } else {
@@ -806,6 +886,18 @@ bool parseArguments(int argc, char* argv[], string& baselineFile) {
             ENABLE_TEMPORAL_REUSE = false;
             USE_BASELINE_IMAGE = false;
         }
+        else if (arg == "-i" || arg == "--iterations") {
+			    if (i + 1 < argc) {
+			        RECURSIVE_ITERATIONS = atoi(argv[++i]);
+			        if (RECURSIVE_ITERATIONS <= 0) {
+			            cerr << "Erro: RECURSIVE_ITERATIONS deve ser maior que 0" << endl;
+			            return false;
+			        }
+			    } else {
+			        cerr << "Erro: " << arg << " requer um valor" << endl;
+			        return false;
+			    }
+			}
         else {
             cerr << "Erro: Argumento desconhecido: " << arg << endl;
             printUsage(argv[0]);
@@ -824,7 +916,11 @@ string generateFilename() {
         oss << "restir_" << (USE_UNBIASED_MODE ? "unbiased_CORRIGIDO" : "biased") << "_" << MAX_CANDIDATES << "_";
         if (ENABLE_SPATIAL_REUSE) oss << "spatial_";
         if (ENABLE_TEMPORAL_REUSE) oss << "temporal_";
-        if (USE_BASELINE_IMAGE) oss << "baseline_";
+        if (BASELINE_RIS_SAMPLES > 0) {
+            oss << "baseline_ris_" << BASELINE_RIS_SAMPLES << "_";
+        } else if (USE_BASELINE_IMAGE) {
+            oss << "baseline_";
+        }
         oss << ".ppm";
     }
     
@@ -836,13 +932,13 @@ int main(int argc, char* argv[]) {
     SetConsoleOutputCP(CP_UTF8);
     // Opcional: Se você estiver lendo entrada do usuário com acentos
     SetConsoleCP(CP_UTF8);
-    cout << "=== Renderizador ReSTIR CORRIGIDO - Sem Escurecimento - Compatível C++98 ===" << endl;
+    cout << "=== Renderizador ReSTIR CORRIGIDO com Baseline RIS Interno - Compatível C++98 ===" << endl;
     string baselineFile;
     if (!parseArguments(argc, argv, baselineFile)) {
         return 1;
     }
     
-    cout << "Configuracao CORRIGIDA:" << endl;
+    cout << "Configuracao:" << endl;
     cout << "  MAX_CANDIDATES: " << MAX_CANDIDATES << endl;
     
     if (USE_MONTE_CARLO_ONLY) {
@@ -853,60 +949,68 @@ int main(int argc, char* argv[]) {
     } else {
         cout << "  AMOSTRAGEM_ESPACIAL: " << (ENABLE_SPATIAL_REUSE ? "ATIVADA" : "DESATIVADA") << endl;
         cout << "  AMOSTRAGEM_TEMPORAL: " << (ENABLE_TEMPORAL_REUSE ? "ATIVADA" : "DESATIVADA") << endl;
-        cout << "  BASELINE_IMAGE: " << (USE_BASELINE_IMAGE ? baselineFile : "NENHUMA") << endl;
+        
+        if (BASELINE_RIS_SAMPLES > 0) {
+            cout << "  BASELINE_RIS: INTERNO (" << BASELINE_RIS_SAMPLES << " amostras)" << endl;
+        } else {
+            cout << "  BASELINE_IMAGE: " << (USE_BASELINE_IMAGE ? baselineFile : "NENHUMA") << endl;
+        }
+        
         cout << "  MODO: " << (USE_UNBIASED_MODE ? "UNBIASED CORRIGIDO - SEM ESCURECIMENTO" : "BIASED") << endl;
     }
     
     cout << "  GEOMETRIA: Plano xadrez + Esferas otimizadas (albedo 0.95)" << endl;
     cout << "  ILUMINACAO: 7 luzes focadas para destacar diferenças" << endl;
-    cout << "  CORRECOES: " << (USE_UNBIASED_MODE ? "PESO RIS CORRIGIDO, SEM DUPLA NORMALIZACAO" : "MODO BIASED PADRÃO") << endl;
     cout << endl;
     
     ReSTIRRenderer renderer;
-    if (USE_BASELINE_IMAGE && !baselineFile.empty() && !USE_MONTE_CARLO_ONLY) {
+    
+    // Verificar se deve carregar baseline de arquivo (só se não for RIS interno)
+    if (USE_BASELINE_IMAGE && !baselineFile.empty() && !USE_MONTE_CARLO_ONLY && BASELINE_RIS_SAMPLES == 0) {
         if (!renderer.loadBaselineImage(baselineFile)) {
             cout << "Continuando sem imagem baseline..." << endl;
         }
     }
     
-    vector<Color> image = renderer.render();
-    string filename = generateFilename();
-    renderer.saveImage(image, filename);
+	vector<Color> image;
+	string baseFilename = generateFilename();
+	// Remover sufixo ".ppm" para montar nomes numerados
+	string fn_prefix = baseFilename;
+	if (fn_prefix.size() >= 4 && fn_prefix.substr(fn_prefix.size()-4) == ".ppm")
+	    fn_prefix = fn_prefix.substr(0, fn_prefix.size()-4);
+	
+	// Primeira renderização normalmente
+	image = renderer.render();
+	string iterFilename = fn_prefix + "_iter1.ppm";
+	renderer.saveImage(image, iterFilename);
+	cout << "Salvo: " << iterFilename << endl;
+	
+	// Iterações recursivas a partir do baseline gerado
+	for(int iter = 2; iter <= RECURSIVE_ITERATIONS; ++iter) {
+	    // Salva resultado anterior como baseline temporária
+	    renderer.baselineImage = image;
+	    renderer.hasBaselineImage = true;
+	    USE_BASELINE_IMAGE = true;
+	    BASELINE_RIS_SAMPLES = 0; // Não gera novo baseline RIS
+	    vector<Color> newImage = renderer.render();
+	    char iterSuffix[16];
+	    sprintf(iterSuffix, "_iter%d.ppm", iter); 
+	    string nextFilename = fn_prefix + string(iterSuffix);
+	    renderer.saveImage(newImage, nextFilename);
+	    cout << "Salvo: " << nextFilename << endl;
+	    image = newImage;
+	}
     
     cout << "Programa finalizado com sucesso!" << endl;
-    cout << "Abra o arquivo '" << filename << "' para ver o resultado!" << endl;
-    cout << "\nCORREÇÕES IMPLEMENTADAS:" << endl;
-    cout << "- Peso final RIS calculado corretamente" << endl;
-    cout << "- Eliminada dupla normalização que causava escurecimento" << endl;
-    cout << "- MIS simplificado para evitar perda de energia" << endl;
-    cout << "- Preservação da intensidade luminosa original" << endl;
+    cout << "Abra o arquivo '" << iterFilename << "' para ver o resultado!" << endl;
     
-    if (USE_MONTE_CARLO_ONLY) {
-        cout << "\nMODO SELECIONADO: MONTE CARLO PURO" << endl;
-        cout << "- Sem reutilização espacial ou temporal" << endl;
-        cout << "- Sem algoritmo RIS" << endl;
-        cout << "- Amostragem independente por pixel" << endl;
-    } else {
-        cout << "\nMODO SELECIONADO: " << (USE_UNBIASED_MODE ? "UNBIASED CORRIGIDO" : "BIASED") << endl;
-        if (USE_UNBIASED_MODE) {
-            cout << "- Implementação corrigida sem escurecimento" << endl;
-            cout << "- Peso RIS calculado corretamente" << endl;
-            cout << "- Eliminada dupla normalização" << endl;
-            cout << "- Preservação de energia luminosa" << endl;
-            cout << "- Resultado com brilho correto" << endl;
-        } else {
-            cout << "- Mais suave, mas com bias nas bordas do xadrez" << endl;
-            cout << "- Usa targetPdf dos vizinhos diretamente" << endl;
-            cout << "- Possível 'over-darkening' nas transições" << endl;
-        }
+    if (BASELINE_RIS_SAMPLES > 0) {
+        cout << "\nMODO BASELINE RIS INTERNO UTILIZADO:" << endl;
+        cout << "- Baseline gerado com " << BASELINE_RIS_SAMPLES << " amostras RIS puras" << endl;
+        cout << "- ReSTIR aplicado com " << MAX_CANDIDATES << " candidatos iniciais" << endl;
+        cout << "- Reutilização temporal baseada no baseline RIS interno" << endl;
+        cout << "- Reutilização espacial: " << (ENABLE_SPATIAL_REUSE ? "ATIVADA" : "DESATIVADA") << endl;
     }
-    
-    cout << "\nPARA VERIFICAR AS CORREÇÕES:" << endl;
-    cout << "- A imagem unbiased agora deve ter brilho correto" << endl;
-    cout << "- Não deve haver escurecimento excessivo" << endl;
-    cout << "- Compare com o modo biased para ver as diferenças" << endl;
-    cout << "- Observe as bordas entre quadrados claros e escuros" << endl;
     
     return 0;
 }
-
